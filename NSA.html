@@ -1,0 +1,615 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NSA CSV Anomaly Detector</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 850px;
+            margin: 35px auto;
+            padding: 0 18px;
+            background: #f4f6f9;
+            color: #202938;
+        }
+
+        h1 {
+            color: #17365d;
+        }
+
+        .panel {
+            background: white;
+            padding: 22px;
+            margin: 20px 0;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px #00000010;
+        }
+
+        button {
+            background: #1756a9;
+            color: white;
+            border: none;
+            padding: 11px 17px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 12px;
+        }
+
+        button:disabled {
+            background: #9aa5b1;
+            cursor: not-allowed;
+        }
+
+        input {
+            display: block;
+            margin-top: 12px;
+            max-width: 100%;
+        }
+
+        .muted {
+            color: #596579;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .result {
+            padding: 14px;
+            margin-top: 15px;
+            border-radius: 6px;
+            overflow-wrap: anywhere;
+        }
+
+        .normal {
+            background: #e2f5e8;
+            color: #176534;
+        }
+
+        .abnormal {
+            background: #fde8e7;
+            color: #a51d1d;
+        }
+
+        .info {
+            background: #e8f0fe;
+            color: #174a8b;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 14px;
+            font-size: 14px;
+        }
+
+        th, td {
+            border-bottom: 1px solid #ddd;
+            padding: 9px 6px;
+            text-align: left;
+            overflow-wrap: anywhere;
+        }
+
+        th {
+            background: #f1f4f8;
+        }
+
+        code {
+            overflow-wrap: anywhere;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>NSA CSV Anomaly Detector</h1>
+
+<p>
+    A local, browser-based file anomaly detector using
+    entropy, column count, and the Negative Selection Algorithm.
+</p>
+
+<div class="panel">
+    <h2>1. Train the detector</h2>
+
+    <p class="muted">
+        Select at least 3 known-normal CSV files.
+        Their entropy and column counts will be used to establish
+        the normal regions and generate detectors.
+    </p>
+
+    <input
+        type="file"
+        id="trainingFiles"
+        accept=".csv,text/csv"
+        multiple
+    >
+
+    <button id="trainButton">Calibrate and Generate Detectors</button>
+
+    <div id="trainingStatus" aria-live="polite"></div>
+    <div id="trainingSummary"></div>
+</div>
+
+<div class="panel">
+    <h2>2. Scan a CSV file</h2>
+
+    <p class="muted">
+        Upload a new CSV file to check whether its features
+        fall within the learned normal regions or match a surviving
+        detector.
+    </p>
+
+    <input
+        type="file"
+        id="scanFile"
+        accept=".csv,text/csv"
+        disabled
+    >
+
+    <button id="scanButton" disabled>Scan File</button>
+
+    <div id="scanResult" aria-live="polite"></div>
+</div>
+
+<div class="panel">
+    <h2>Model settings</h2>
+
+    <ul>
+        <li>Entropy tolerance around each normal example: ±0.2 bits per byte.</li>
+        <li>Normal column-count tolerance: ±0.5 columns.</li>
+        <li>Detector recognition radius: ±0.2 entropy and ±0.5 columns.</li>
+        <li>Candidate detector attempts: 15,000.</li>
+        <li>Detector storage: browser memory only; refreshing clears it.</li>
+    </ul>
+
+    <p class="muted">
+        The model uses raw-byte entropy. CSV column count is obtained
+        from the first non-empty record, with quoted commas handled.
+        Use consistently encoded CSV files for meaningful comparisons.
+    </p>
+</div>
+
+<script>
+    // ----------------------------------------
+    // CONFIGURATION
+    // ----------------------------------------
+
+    const MIN_TRAINING_FILES = 3;
+
+    // Normal region around each training example.
+    const NORMAL_ENTROPY_TOLERANCE = 0.2;
+    const NORMAL_COLUMN_TOLERANCE = 0.5;
+
+    // Detector recognition radii.
+    const DETECTOR_ENTROPY_RADIUS = 0.2;
+    const DETECTOR_COLUMN_RADIUS = 0.5;
+
+    const CANDIDATE_ATTEMPTS = 15000;
+
+    // Candidate detector search space.
+    // Byte entropy is between 0 and 8 bits per byte.
+    // Column-count detector centers are sampled from 0.5 to 10.5.
+    const MIN_ENTROPY = 0;
+    const MAX_ENTROPY = 8;
+    const MIN_COLUMN_CENTER = 0.5;
+    const MAX_COLUMN_CENTER = 10.5;
+
+
+    // ----------------------------------------
+    // SESSION-ONLY MODEL STATE
+    // ----------------------------------------
+
+    let normalProfiles = [];
+    let detectors = [];
+    let trained = false;
+
+
+    // ----------------------------------------
+    // ENTROPY CALCULATION
+    // ----------------------------------------
+
+    function calculateEntropy(bytes) {
+        if (bytes.length === 0) {
+            return 0;
+        }
+
+        const counts = new Array(256).fill(0);
+
+        for (const byte of bytes) {
+            counts[byte]++;
+        }
+
+        let entropy = 0;
+        const total = bytes.length;
+
+        for (const count of counts) {
+            if (count === 0) {
+                continue;
+            }
+
+            const probability = count / total;
+            entropy -= probability * Math.log2(probability);
+        }
+
+        return entropy;
+    }
+
+
+    // ----------------------------------------
+    // CSV COLUMN COUNT
+    // Counts fields in the first non-empty record.
+    // Commas inside quoted fields are ignored.
+    // ----------------------------------------
+
+    function countCsvColumns(text) {
+        // Remove a possible UTF-8 BOM after decoding.
+        text = text.replace(/^\uFEFF/, "");
+
+        let commas = 0;
+        let inQuotes = false;
+        let hasContent = false;
+
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+
+            if (ch === '"') {
+                if (inQuotes && text[i + 1] === '"') {
+                    // Escaped double quote inside a quoted field.
+                    i++;
+                    hasContent = true;
+                } else {
+                    inQuotes = !inQuotes;
+                    hasContent = true;
+                }
+            } else if (ch === "," && !inQuotes) {
+                commas++;
+                hasContent = true;
+            } else if (
+                (ch === "\n" || ch === "\r") &&
+                !inQuotes
+            ) {
+                if (hasContent) {
+                    return commas + 1;
+                }
+
+                // Skip empty lines before the first record.
+                commas = 0;
+                hasContent = false;
+            } else {
+                hasContent = true;
+            }
+        }
+
+        if (inQuotes) {
+            throw new Error("The CSV contains an unclosed quoted field.");
+        }
+
+        return hasContent ? commas + 1 : null;
+    }
+
+
+    // ----------------------------------------
+    // EXTRACT FEATURES FROM A FILE
+    // ----------------------------------------
+
+    async function extractFeatures(file) {
+        const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        const text = new TextDecoder("utf-8", {
+            fatal: true
+        }).decode(bytes);
+
+        const entropy = calculateEntropy(bytes);
+        const columns = countCsvColumns(text);
+
+        if (columns === null) {
+            throw new Error("The file is empty.");
+        }
+
+        return {
+            name: file.name,
+            entropy: entropy,
+            columns: columns,
+            size: bytes.length
+        };
+    }
+
+
+    // ----------------------------------------
+    // NORMAL REGION MATCHING
+    // ----------------------------------------
+
+    function matchesNormalRegion(features, profile) {
+        return (
+            Math.abs(features.entropy - profile.entropy)
+                <= NORMAL_ENTROPY_TOLERANCE &&
+            Math.abs(features.columns - profile.columns)
+                <= NORMAL_COLUMN_TOLERANCE
+        );
+    }
+
+    function isKnownNormal(features) {
+        return normalProfiles.some(profile =>
+            matchesNormalRegion(features, profile)
+        );
+    }
+
+
+    // ----------------------------------------
+    // NSA NEGATIVE SELECTION
+    //
+    // Each candidate is a point in the feature space:
+    // (entropy, column count).
+    //
+    // Reject a candidate if its recognition rectangle
+    // would overlap any known-normal rectangle.
+    // Retain candidates that pass this negative selection.
+    // ----------------------------------------
+
+    function generateDetectors() {
+        const survivors = [];
+
+        for (let i = 0; i < CANDIDATE_ATTEMPTS; i++) {
+            const candidate = {
+                entropy:
+                    MIN_ENTROPY +
+                    Math.random() * (MAX_ENTROPY - MIN_ENTROPY),
+
+                columns:
+                    MIN_COLUMN_CENTER +
+                    Math.random() *
+                    (MAX_COLUMN_CENTER - MIN_COLUMN_CENTER)
+            };
+
+            const overlapsNormal = normalProfiles.some(profile => {
+                const entropyDistance = Math.abs(
+                    candidate.entropy - profile.entropy
+                );
+
+                const columnDistance = Math.abs(
+                    candidate.columns - profile.columns
+                );
+
+                // Reject candidates whose recognition regions
+                // overlap the normal region in BOTH dimensions.
+                const overlapsEntropy =
+                    entropyDistance <=
+                    NORMAL_ENTROPY_TOLERANCE +
+                    DETECTOR_ENTROPY_RADIUS;
+
+                const overlapsColumns =
+                    columnDistance <=
+                    NORMAL_COLUMN_TOLERANCE +
+                    DETECTOR_COLUMN_RADIUS;
+
+                return overlapsEntropy && overlapsColumns;
+            });
+
+            if (!overlapsNormal) {
+                survivors.push(candidate);
+            }
+        }
+
+        return survivors;
+    }
+
+
+    // ----------------------------------------
+    // TEST AGAINST SURVIVING DETECTORS
+    // ----------------------------------------
+
+    function findMatchingDetector(features) {
+        return detectors.find(detector => {
+            return (
+                Math.abs(features.entropy - detector.entropy)
+                    <= DETECTOR_ENTROPY_RADIUS &&
+                Math.abs(features.columns - detector.columns)
+                    <= DETECTOR_COLUMN_RADIUS
+            );
+        });
+    }
+
+
+    // ----------------------------------------
+    // TRAINING INTERFACE
+    // ----------------------------------------
+
+    const trainingInput = document.getElementById("trainingFiles");
+    const trainButton = document.getElementById("trainButton");
+    const trainingStatus = document.getElementById("trainingStatus");
+    const trainingSummary = document.getElementById("trainingSummary");
+    const scanInput = document.getElementById("scanFile");
+    const scanButton = document.getElementById("scanButton");
+    const scanResult = document.getElementById("scanResult");
+
+    function resetModel() {
+        normalProfiles = [];
+        detectors = [];
+        trained = false;
+
+        scanInput.disabled = true;
+        scanButton.disabled = true;
+
+        trainingSummary.replaceChildren();
+        scanResult.replaceChildren();
+    }
+
+    trainingInput.addEventListener("change", () => {
+        resetModel();
+        trainingStatus.textContent =
+            "Selected files have not been calibrated yet.";
+    });
+
+    trainButton.addEventListener("click", async () => {
+        resetModel();
+
+        const files = Array.from(trainingInput.files);
+
+        if (files.length < MIN_TRAINING_FILES) {
+            trainingStatus.textContent =
+                "Please select at least 3 normal CSV files.";
+            return;
+        }
+
+        trainButton.disabled = true;
+        trainingStatus.textContent = "Analysing training files...";
+
+        try {
+            const profiles = [];
+
+            for (const file of files) {
+                const features = await extractFeatures(file);
+                profiles.push(features);
+            }
+
+            normalProfiles = profiles;
+
+            trainingStatus.textContent =
+                "Generating candidate detectors and applying negative selection...";
+
+            // Let the browser update the status before computation.
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            detectors = generateDetectors();
+            trained = true;
+
+            const table = document.createElement("table");
+            table.innerHTML = `
+                <thead>
+                    <tr>
+                        <th>Training file</th>
+                        <th>Entropy</th>
+                        <th>Columns</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+
+            const tbody = table.querySelector("tbody");
+
+            for (const profile of normalProfiles) {
+                const row = document.createElement("tr");
+
+                for (const value of [
+                    profile.name,
+                    profile.entropy.toFixed(4),
+                    profile.columns
+                ]) {
+                    const cell = document.createElement("td");
+                    cell.textContent = String(value);
+                    row.appendChild(cell);
+                }
+
+                tbody.appendChild(row);
+            }
+
+            trainingSummary.appendChild(table);
+
+            const message = document.createElement("div");
+            message.className = "result info";
+            message.textContent =
+                `Calibration complete. Analysed ${normalProfiles.length} ` +
+                `normal files and retained ${detectors.length} detectors.`;
+
+            trainingSummary.appendChild(message);
+
+            scanInput.disabled = false;
+            scanButton.disabled = false;
+
+            trainingStatus.textContent = "Training completed successfully.";
+
+        } catch (error) {
+            resetModel();
+            trainingStatus.textContent =
+                "Training failed: " + error.message;
+        } finally {
+            trainButton.disabled = false;
+        }
+    });
+
+
+    // ----------------------------------------
+    // SCANNING INTERFACE
+    // ----------------------------------------
+
+    scanButton.addEventListener("click", async () => {
+        if (!trained) {
+            scanResult.textContent = "Train the model first.";
+            return;
+        }
+
+        const file = scanInput.files[0];
+
+        if (!file) {
+            scanResult.textContent = "Please select a CSV file to scan.";
+            return;
+        }
+
+        scanButton.disabled = true;
+        scanResult.textContent = "Scanning...";
+
+        try {
+            const features = await extractFeatures(file);
+
+            const normalMatch = isKnownNormal(features);
+            const detectorMatch = findMatchingDetector(features);
+
+            const result = document.createElement("div");
+
+            if (normalMatch) {
+                result.className = "result normal";
+                result.innerHTML = "<strong>CLASSIFICATION: NORMAL</strong>";
+
+                const details = document.createElement("p");
+                details.textContent =
+                    "The file falls within an accepted normal region " +
+                    "learned from the training examples.";
+                result.appendChild(details);
+
+            } else {
+                result.className = "result abnormal";
+                result.innerHTML =
+                    "<strong>CLASSIFICATION: ABNORMAL</strong>";
+
+                const details = document.createElement("p");
+
+                if (detectorMatch) {
+                    details.textContent =
+                        "A surviving NSA detector matched this file. " +
+                        "Its feature values are outside the accepted " +
+                        "normal regions.";
+                } else {
+                    details.textContent =
+                        "The file is outside all accepted normal regions, " +
+                        "but no surviving detector matched it. It is flagged " +
+                        "as abnormal because the detector set does not cover " +
+                        "every possible anomalous region.";
+                }
+
+                result.appendChild(details);
+            }
+
+            const featuresText = document.createElement("p");
+            featuresText.textContent =
+                `File: ${features.name} | ` +
+                `Entropy: ${features.entropy.toFixed(4)} bits/byte | ` +
+                `Columns: ${features.columns} | ` +
+                `Size: ${features.size} bytes`;
+
+            result.appendChild(featuresText);
+
+            scanResult.replaceChildren(result);
+
+        } catch (error) {
+            scanResult.textContent =
+                "Could not scan file: " + error.message;
+        } finally {
+            scanButton.disabled = false;
+        }
+    });
+</script>
+
+</body>
+</html>
