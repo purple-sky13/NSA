@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9,8 +8,8 @@
     <style>
         body {
             font-family: Arial, sans-serif;
-            max-width: 850px;
-            margin: 35px auto;
+            max-width: none;
+            margin: 25px;
             padding: 0 18px;
             background: #f4f6f9;
             color: #202938;
@@ -18,6 +17,17 @@
 
         h1 {
             color: #17365d;
+        }
+
+        .page-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 3fr) minmax(0, 1fr);
+            gap: 20px;
+            align-items: start;
+        }
+
+        .main-content {
+            min-width: 0;
         }
 
         .panel {
@@ -98,10 +108,109 @@
         code {
             overflow-wrap: anywhere;
         }
+
+        /* Added right-side source-code panel */
+        .source-panel {
+            background: #ffffff;
+            color: #24292f;
+            border: 1px solid #d0d7de;
+            border-radius: 10px;
+            overflow: hidden;
+            position: sticky;
+            top: 20px;
+            min-width: 0;
+            margin-top: 20px;
+        }
+
+        .source-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 12px;
+            background: #f6f8fa;
+            border-bottom: 1px solid #d8dee4;
+        }
+
+        .source-header h2 {
+            font-size: 16px;
+            margin: 0;
+            color: #24292f;
+        }
+
+        .source-header button {
+            margin: 0;
+            padding: 8px 10px;
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+
+        #sourceCode {
+            display: block;
+            margin: 0;
+            padding: 14px;
+            height: calc(100vh - 85px);
+            min-height: 460px;
+            overflow: auto;
+            background: #ffffff;
+            color: #24292f;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 11px;
+            line-height: 1.55;
+            white-space: pre;
+            tab-size: 4;
+        }
+
+        /* Light-theme syntax colours */
+        .syntax-tag {
+            color: #0550ae;
+        }
+
+        .syntax-attribute {
+            color: #953800;
+        }
+
+        .syntax-string {
+            color: #0a3069;
+        }
+
+        .syntax-keyword {
+            color: #8250df;
+        }
+
+        .syntax-number {
+            color: #0550ae;
+        }
+
+        .syntax-comment {
+            color: #6e7781;
+        }
+
+        .syntax-function {
+            color: #8250df;
+        }
+
+        @media (max-width: 1000px) {
+            .page-layout {
+                grid-template-columns: minmax(0, 1fr);
+            }
+
+            .source-panel {
+                position: static;
+            }
+
+            #sourceCode {
+                height: 600px;
+            }
+        }
     </style>
 </head>
 
 <body>
+
+<div class="page-layout">
+
+<div class="main-content">
 
 <h1>NSA CSV Anomaly Detector</h1>
 
@@ -169,6 +278,20 @@
         from the first non-empty record, with quoted commas handled.
         Use consistently encoded CSV files for meaningful comparisons.
     </p>
+</div>
+
+</div>
+
+<!-- Added right-side source-code panel -->
+<aside class="source-panel">
+    <div class="source-header">
+        <h2>Source Code</h2>
+        <button id="copyCodeButton">Copy Code</button>
+    </div>
+
+    <pre id="sourceCode"></pre>
+</aside>
+
 </div>
 
 <script>
@@ -578,7 +701,7 @@
                 if (detectorMatch) {
                     details.textContent =
                         "A surviving NSA detector matched this file. " +
-                        "Its feature values are outside the accepted " +
+                        "Also, its feature values are outside the accepted " +
                         "normal regions.";
                 } else {
                     details.textContent =
@@ -609,6 +732,115 @@
             scanButton.disabled = false;
         }
     });
+
+
+    // ----------------------------------------
+    // ADDED: SOURCE CODE PANEL
+    // ----------------------------------------
+
+    function escapeSourceHtml(text) {
+        return text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+    }
+
+    function highlightSourceCode(source) {
+        // Escape HTML before applying syntax colours.
+        const escaped = escapeSourceHtml(source);
+
+        const tokenPattern =
+            /(&lt;!--[\s\S]*?--&gt;|&lt;\/?[a-zA-Z][^&]*?&gt;|\/\/[^\n]*|\/\*[\s\S]*?\*\/|"[^"]*"|'[^']*'|`[^`]*`|\b(?:const|let|var|function|return|if|else|for|of|in|new|throw|try|catch|finally|async|await|class|this|true|false|null|undefined|continue|break|typeof|switch|case|default|while)\b|\b\d+(?:\.\d+)?\b)/g;
+
+        return escaped.replace(tokenPattern, match => {
+            if (
+                match.startsWith("&lt;!--") ||
+                match.startsWith("//") ||
+                match.startsWith("/*")
+            ) {
+                return `<span class="syntax-comment">${match}</span>`;
+            }
+
+            if (
+                match.startsWith('"') ||
+                match.startsWith("'") ||
+                match.startsWith("`")
+            ) {
+                return `<span class="syntax-string">${match}</span>`;
+            }
+
+            if (match.startsWith("&lt;")) {
+                return `<span class="syntax-tag">${match}</span>`;
+            }
+
+            if (/^\d/.test(match)) {
+                return `<span class="syntax-number">${match}</span>`;
+            }
+
+            if (
+                match === "function" ||
+                match === "return" ||
+                match === "async"
+            ) {
+                return `<span class="syntax-function">${match}</span>`;
+            }
+
+            return `<span class="syntax-keyword">${match}</span>`;
+        });
+    }
+
+    function getSourceCode() {
+        const clone = document.documentElement.cloneNode(true);
+
+        // Keep the source panel from recursively displaying itself.
+        const sourceElement = clone.querySelector("#sourceCode");
+
+        if (sourceElement) {
+            sourceElement.textContent = "";
+        }
+
+        // The displayed source should not contain a copied button state.
+        const copyButton = clone.querySelector("#copyCodeButton");
+
+        if (copyButton) {
+            copyButton.textContent = "Copy Code";
+        }
+
+        return "<!DOCTYPE html>\n" + clone.outerHTML;
+    }
+
+    function populateSourcePanel() {
+        const source = getSourceCode();
+
+        document.getElementById("sourceCode").innerHTML =
+            highlightSourceCode(source);
+    }
+
+    document.getElementById("copyCodeButton")
+        .addEventListener("click", async () => {
+            const source = getSourceCode();
+
+            try {
+                await navigator.clipboard.writeText(source);
+
+                const button =
+                    document.getElementById("copyCodeButton");
+
+                button.textContent = "Copied!";
+
+                setTimeout(() => {
+                    button.textContent = "Copy Code";
+                }, 1500);
+
+            } catch {
+                alert(
+                    "Clipboard access failed. Please copy the code manually."
+                );
+            }
+        });
+
+    populateSourcePanel();
+
 </script>
 
 </body>
